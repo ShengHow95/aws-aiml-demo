@@ -1,0 +1,389 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  aws-aiml-services
+  This is a demo project uses AWS AIML Services to perform text and image analytics
+
+Globals:
+  Function:
+    Layers:
+    - !Ref DependencyLayer
+    Runtime: python3.8
+    MemorySize: 1024
+    Tracing: Active
+    Timeout: 30
+  Api:
+    Cors:
+      AllowMethods: "'DELETE,GET,POST,PUT'"
+      AllowHeaders: "'Authorization,Content-Type'"
+      AllowOrigin: "'*'"
+
+Parameters:
+  S3BucketName:
+    Type: String
+    Default: jeff-aws-aiml
+
+Resources:
+# Cognito
+  AIMLUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: AWS-AIML-UserPool
+      Policies:
+        PasswordPolicy: 
+          MinimumLength: 8
+          RequireLowercase: false
+          RequireNumbers: false
+          RequireUppercase: false
+          TemporaryPasswordValidityDays: 7
+      LambdaConfig:
+        PreSignUp: !GetAtt CognitoAutoConfirmUserFunction.Arn
+  AIMLUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: AWS-AIML-AppClient
+      UserPoolId: !Ref AIMLUserPool
+      GenerateSecret: false
+  AIMLUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: jeff-aiml-demo-services
+      UserPoolId: !Ref AIMLUserPool
+
+# DynamoDB Table
+  ApiUsageTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: api-usage-table
+      AttributeDefinitions:
+      - AttributeName: pk
+        AttributeType: S
+      KeySchema: 
+      - AttributeName: pk
+        KeyType: HASH
+      BillingMode: PROVISIONED
+      ProvisionedThroughput: 
+        ReadCapacityUnits: "5"
+        WriteCapacityUnits: "5"
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+# Lambda Layers
+  DependencyLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: DependencyLayer
+      ContentUri: layer/dependency/
+      CompatibleRuntimes:
+        - python3.8
+      LicenseInfo: MIT
+      RetentionPolicy: Retain
+    Metadata:
+      BuildMethod: python3.8
+
+# API Gateway
+  AIMLRestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub ${AWS::StackName}-Api
+      TracingEnabled: true
+      StageName: dev
+      BinaryMediaTypes: 
+      - image~1*
+      EndpointConfiguration:
+        Type: REGIONAL
+      DefinitionBody:
+        'Fn::Transform':
+          Name: AWS::Include
+          Parameters:
+            Location: !Sub s3://${S3BucketName}/${AWS::StackName}/openapi-spec.yaml
+
+  APIGatewayS3Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+
+# Lambda Functions and Roles
+  ComprehendFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: function/comprehend/
+      Handler: app.lambda_handler
+      Role: !GetAtt ComprehendFunctionRole.Arn
+      Environment:
+        Variables:
+          DDBTable: !Ref ApiUsageTable
+      Events:
+        ComprehendApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AIMLRestApi
+            Path: /comprehend
+            Method: POST
+  ComprehendFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/ComprehendReadOnly
+
+  TranslateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: function/translate/
+      Handler: app.lambda_handler
+      Role: !GetAtt TranslateFunctionRole.Arn
+      Environment:
+        Variables:
+          DDBTable: !Ref ApiUsageTable
+      Events:
+        TranslateApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AIMLRestApi
+            Path: /translate
+            Method: POST
+  TranslateFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/TranslateReadOnly
+
+  RekognitionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: function/rekognition/
+      Handler: app.lambda_handler
+      Role: !GetAtt RekognitionFunctionRole.Arn
+      Environment:
+        Variables:
+          DDBTable: !Ref ApiUsageTable
+          S3Bucket: !Ref S3BucketName
+      Events:
+        RekognitionApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AIMLRestApi
+            Path: /rekognition
+            Method: POST
+  RekognitionFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonRekognitionReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+
+  CognitoAutoConfirmUserFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: function/cognito-autoconfirmuser/
+      Handler: app.lambda_handler
+      Role: !GetAtt CognitoAutoConfirmUserRole.Arn
+      Environment:
+        Variables:
+          DDBTable: !Ref ApiUsageTable
+  CognitoAutoConfirmUserRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  CognitoLambdaAccessPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt CognitoAutoConfirmUserFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt AIMLUserPool.Arn
+
+  GetApiCountFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: function/get-apicount/
+      Handler: app.lambda_handler
+      Role: !GetAtt GetApiCountFunctionRole.Arn
+      Environment:
+        Variables:
+          DDBTable: !Ref ApiUsageTable
+      Events:
+        GetApiCountApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AIMLRestApi
+            Path: /apicount
+            Method: GET
+  GetApiCountFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+# Codecommit Repo
+  AIMLFrontendRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: aiml-demo
+      RepositoryDescription: This is a sample demo project using aws aiml services.
+
+# Amplify App
+  AIMLAmplifyApp:
+    Type: AWS::Amplify::App
+    Properties:
+      Description: AIML Amplify App
+      Name: AIML-Amplify-App
+      Repository: !GetAtt AIMLFrontendRepo.CloneUrlHttp
+      IAMServiceRole: !GetAtt AIMLAmplifyRole.Arn
+      EnvironmentVariables:
+        - Name: REGION
+          Value: !Ref AWS::Region
+        - Name: API_ENDPOINT
+          Value: !Sub https://${AIMLRestApi}.execute-api.${AWS::Region}.amazonaws.com/dev
+        - Name: COGNITO_USERPOOL_ID
+          Value: !Ref AIMLUserPool
+        - Name: COGNITO_USERPOOL_CLIENT_ID
+          Value: !Ref AIMLUserPoolClient
+      CustomRules:
+        - Source: /<*>
+          Status: 404-200
+          Target: /index.html
+        - Source: </^[^.]+$|\.(?!(css|gif|ico|jpg|js|png|txt|svg|woff|ttf|map|json)$)([^.]+$)/>
+          Status: 200
+          Target: /index.html
+      BuildSpec: |-
+        version: 1
+        frontend:
+          phases:
+            preBuild:
+              commands:
+                - cd frontend
+                - npm install
+            build:
+              commands:
+                - echo "REGION=$REGION" >> .env
+                - echo "API_ENDPOINT=$API_ENDPOINT" >> .env
+                - echo "COGNITO_USERPOOL_ID=$COGNITO_USERPOOL_ID" >> .env
+                - echo "COGNITO_USERPOOL_CLIENT_ID=$COGNITO_USERPOOL_CLIENT_ID" >> .env
+                - npm run generate
+          artifacts:
+            baseDirectory: dist
+            files:
+              - '**/*'
+          cache:
+            paths:
+              - node_modules/**/*
+      Tags: 
+        - Key: Stack
+          Value: !Ref AWS::StackName
+  AmplifyBranch:
+    Type: AWS::Amplify::Branch
+    Properties:
+      BranchName: master
+      AppId: !GetAtt AIMLAmplifyApp.AppId
+      Description: Master Branch
+      EnableAutoBuild: true
+  AIMLAmplifyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - amplify.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: AmplifyPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: "amplify:*"
+                Resource: "*"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodeCommitFullAccess
+
+Outputs:
+  S3Bucket:
+    Description: S3 Bucket Name for AWS AIML Services Demo
+    Value: !Ref S3BucketName
+    Export:
+      Name: S3BucketName
+  ApiUsageDDBTable:
+    Description: DynamoDB API Usage Table
+    Value: !Ref ApiUsageTable
+    Export:
+      Name: ApiUsageTable
+  AIMLRestApiEndpoint:
+    Description: API Gateway Endpoint URL for AWS AIML Services
+    Value: !Sub https://${AIMLRestApi}.execute-api.${AWS::Region}.amazonaws.com/dev
+    Export:
+      Name: AIMLRestApi
