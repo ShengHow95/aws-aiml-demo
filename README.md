@@ -1,8 +1,6 @@
 # aws-aiml-demo
 Demo Project with AWS AIML Services such as AWS Comprehend, Translate and Rekognition.
 
-Try it out here. https://aiml-demo.jeffkong95.com
-
 ## Frontend Framework/Services
 1. Nuxtjs
 2. AWS Amplify (Core and Auth)
